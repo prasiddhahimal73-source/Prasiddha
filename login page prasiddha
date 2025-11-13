@@ -1,0 +1,301 @@
+"""
+prasiddha_login_customer.py
+Spicy Bites - Login & Customer Management System
+Author: Prasiddha (for Group: Suraj, Prasiddha, Sonam)
+Requirements covered:
+ - GUI using Tkinter
+ - OOP: DatabaseManager + AuthCustomerGUI
+ - Stores users (staff) and customers in same spicybites.db SQLite file
+ - Shows logged-in username for use by PaymentSystem (processed_by)
+"""
+
+import sqlite3
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+import hashlib
+
+DB_FILE = "spicybites.db"
+
+# -------------------------
+# DB manager: reuse same DB as payment module
+# -------------------------
+class DatabaseManager:
+    def __init__(self, db_file=DB_FILE):
+        self.conn = sqlite3.connect(db_file)
+        self._create_tables()
+
+    def _create_tables(self):
+        cur = self.conn.cursor()
+        # Users table (staff accounts)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password_hash TEXT,
+            role TEXT DEFAULT 'staff'
+        )""")
+        # Customers (already created by other module too)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS customers (
+            customer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE,
+            contact TEXT,
+            membership TEXT DEFAULT 'regular',
+            loyalty_points INTEGER DEFAULT 0
+        )""")
+        self.conn.commit()
+        # Create a default staff user for testing:
+        self._create_default_user()
+
+    def _create_default_user(self):
+        cur = self.conn.cursor()
+        default_username = "admin"
+        default_password = "admin123"  # change later
+        hashed = self._hash(default_password)
+        cur.execute("INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+                    (default_username, hashed, "staff"))
+        self.conn.commit()
+
+    def _hash(self, plaintext):
+        return hashlib.sha256(plaintext.encode('utf-8')).hexdigest()
+
+    # User operations
+    def create_user(self, username, plaintext_password, role="staff"):
+        cur = self.conn.cursor()
+        hashed = self._hash(plaintext_password)
+        try:
+            cur.execute("INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+                        (username, hashed, role))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def validate_user(self, username, plaintext_password):
+        cur = self.conn.cursor()
+        cur.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
+        if not row:
+            return False, None
+        stored_hash, role = row
+        return (stored_hash == self._hash(plaintext_password)), role
+
+    # Customer operations
+    def add_or_update_customer(self, name, contact="", membership="regular", points=0):
+        cur = self.conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO customers (name, contact, membership, loyalty_points) VALUES (?, ?, ?, ?)",
+                    (name, contact, membership, points))
+        cur.execute("UPDATE customers SET contact=?, membership=?, loyalty_points=? WHERE name=?",
+                    (contact, membership, points, name))
+        self.conn.commit()
+
+    def get_all_customers(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT customer_id, name, contact, membership, loyalty_points FROM customers ORDER BY name")
+        return cur.fetchall()
+
+    def get_customer(self, name):
+        cur = self.conn.cursor()
+        cur.execute("SELECT name, contact, membership, loyalty_points FROM customers WHERE name=?", (name,))
+        return cur.fetchone()
+
+    def delete_customer(self, name):
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM customers WHERE name=?", (name,))
+        self.conn.commit()
+
+    def update_points(self, name, points):
+        cur = self.conn.cursor()
+        cur.execute("UPDATE customers SET loyalty_points=? WHERE name=?", (points, name))
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+
+# -------------------------
+# GUI: Authentication and Customer Management
+# -------------------------
+class AuthCustomerGUI:
+    def __init__(self, root, db: DatabaseManager):
+        self.root = root
+        self.db = db
+        self.root.title("Spicy Bites - Login & Customer Management (Prasiddha)")
+        self.root.geometry("720x480")
+        self.logged_in_user = None
+        self.build_gui()
+
+    def build_gui(self):
+        # Left: login area
+        left = tk.Frame(self.root, padx=10, pady=10)
+        left.pack(side='left', fill='y')
+
+        tk.Label(left, text="Staff Login", font=("Arial", 14, "bold")).pack(pady=6)
+        tk.Label(left, text="Username:").pack(anchor='w')
+        self.username_entry = tk.Entry(left)
+        self.username_entry.pack()
+        tk.Label(left, text="Password:").pack(anchor='w')
+        self.password_entry = tk.Entry(left, show="*")
+        self.password_entry.pack()
+
+        tk.Button(left, text="Login", width=14, command=self.login).pack(pady=6)
+        tk.Button(left, text="Create Staff Account", width=14, command=self.create_staff).pack(pady=6)
+        tk.Button(left, text="Logout", width=14, command=self.logout).pack(pady=6)
+
+        self.login_status = tk.Label(left, text="Not logged in", fg="red")
+        self.login_status.pack(pady=6)
+
+        # Right: customer management
+        right = tk.Frame(self.root, padx=10, pady=10)
+        right.pack(side='right', fill='both', expand=True)
+
+        header = tk.Label(right, text="Customer Management", font=("Arial", 14, "bold"))
+        header.pack(anchor='w')
+
+        # Controls to add/update customer
+        control_frame = tk.Frame(right)
+        control_frame.pack(fill='x', pady=6)
+        tk.Label(control_frame, text="Name:").grid(row=0, column=0, sticky='w')
+        self.cust_name = tk.Entry(control_frame)
+        self.cust_name.grid(row=0, column=1, sticky='w')
+        tk.Label(control_frame, text="Contact:").grid(row=1, column=0, sticky='w')
+        self.cust_contact = tk.Entry(control_frame)
+        self.cust_contact.grid(row=1, column=1, sticky='w')
+        tk.Label(control_frame, text="Membership:").grid(row=2, column=0, sticky='w')
+        self.cust_membership = tk.StringVar(value="regular")
+        tk.OptionMenu(control_frame, self.cust_membership, "regular", "student", "vip").grid(row=2, column=1, sticky='w')
+        tk.Label(control_frame, text="Loyalty points:").grid(row=3, column=0, sticky='w')
+        self.cust_points = tk.Entry(control_frame)
+        self.cust_points.grid(row=3, column=1, sticky='w')
+
+        tk.Button(control_frame, text="Add/Update Customer", command=self.add_update_customer).grid(row=4, column=0, pady=6)
+        tk.Button(control_frame, text="Delete Customer", command=self.delete_customer).grid(row=4, column=1, pady=6)
+
+        # Customer list
+        self.cust_listbox = tk.Listbox(right, width=50)
+        self.cust_listbox.pack(pady=6)
+        self.cust_listbox.bind('<<ListboxSelect>>', self.on_customer_select)
+
+        # Buttons for refresh / load
+        btn_frame = tk.Frame(right)
+        btn_frame.pack(fill='x')
+        tk.Button(btn_frame, text="Refresh List", command=self.refresh_customers).pack(side='left', padx=4)
+        tk.Button(btn_frame, text="Load Selected in Payment (copy name)", command=self.copy_to_clipboard).pack(side='left', padx=4)
+
+        # Initially load customers
+        self.refresh_customers()
+
+    # -------------------------
+    # Authentication
+    # -------------------------
+    def login(self):
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get().strip()
+        if not username or not password:
+            messagebox.showwarning("Missing", "Enter username and password.")
+            return
+        ok, role = self.db.validate_user(username, password)
+        if ok:
+            self.logged_in_user = username
+            self.login_status.config(text=f"Logged in as: {username} ({role})", fg="green")
+            messagebox.showinfo("Login", f"Welcome {username}!")
+        else:
+            messagebox.showerror("Login failed", "Invalid username or password.")
+
+    def create_staff(self):
+        # simple dialog to create staff
+        username = simpledialog.askstring("New staff", "Enter staff username:")
+        if not username:
+            return
+        password = simpledialog.askstring("New staff", "Enter password:", show='*')
+        if not password:
+            return
+        created = self.db.create_user(username, password, role="staff")
+        if created:
+            messagebox.showinfo("Staff created", f"Staff account '{username}' created.")
+        else:
+            messagebox.showerror("Error", "Username already exists.")
+
+    def logout(self):
+        self.logged_in_user = None
+        self.login_status.config(text="Not logged in", fg="red")
+        messagebox.showinfo("Logout", "Logged out.")
+
+    # -------------------------
+    # Customer management
+    # -------------------------
+    def add_update_customer(self):
+        name = self.cust_name.get().strip()
+        contact = self.cust_contact.get().strip()
+        membership = self.cust_membership.get()
+        points = self.cust_points.get().strip()
+        try:
+            points = int(points) if points else 0
+        except ValueError:
+            messagebox.showerror("Invalid", "Points must be an integer.")
+            return
+        if not name:
+            messagebox.showwarning("Missing", "Enter customer name.")
+            return
+        self.db.add_or_update_customer(name, contact, membership, points)
+        messagebox.showinfo("Saved", f"Customer '{name}' saved/updated.")
+        self.refresh_customers()
+
+    def refresh_customers(self):
+        self.cust_listbox.delete(0, 'end')
+        rows = self.db.get_all_customers()
+        for row in rows:
+            cid, name, contact, membership, points = row
+            self.cust_listbox.insert('end', f"{name} | {membership} | {points} pts | {contact}")
+
+    def on_customer_select(self, _evt):
+        sel = self.cust_listbox.curselection()
+        if not sel:
+            return
+        text = self.cust_listbox.get(sel[0])
+        # text format: "Name | membership | X pts | contact"
+        parts = text.split('|')
+        name = parts[0].strip()
+        data = self.db.get_customer(name)
+        if data:
+            # (name, contact, membership, loyalty_points)
+            self.cust_name.delete(0, 'end'); self.cust_name.insert(0, data[0])
+            self.cust_contact.delete(0, 'end'); self.cust_contact.insert(0, data[1])
+            self.cust_membership.set(data[2])
+            self.cust_points.delete(0, 'end'); self.cust_points.insert(0, str(data[3]))
+
+    def delete_customer(self):
+        name = self.cust_name.get().strip()
+        if not name:
+            messagebox.showwarning("Missing", "Select or enter customer name to delete.")
+            return
+        confirm = messagebox.askyesno("Confirm", f"Delete customer '{name}'?")
+        if confirm:
+            self.db.delete_customer(name)
+            messagebox.showinfo("Deleted", f"Customer '{name}' deleted.")
+            self.refresh_customers()
+
+    def copy_to_clipboard(self):
+        sel = self.cust_listbox.curselection()
+        if not sel:
+            messagebox.showwarning("Select customer", "Select a customer to copy name.")
+            return
+        text = self.cust_listbox.get(sel[0])
+        name = text.split('|')[0].strip()
+        # copy name to clipboard (useful to paste into Payment module)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(name)
+        messagebox.showinfo("Copied", f"Customer name '{name}' copied to clipboard. Paste into Payment module 'Customer Name' field.")
+
+# -------------------------
+# Main runnable
+# -------------------------
+def main():
+    db = DatabaseManager()
+    root = tk.Tk()
+    app = AuthCustomerGUI(root, db)
+    root.protocol("WM_DELETE_WINDOW", lambda: (db.close(), root.destroy()))
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
